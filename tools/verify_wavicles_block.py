@@ -109,8 +109,13 @@ def main():
     h = b2b(canon(snap)).hex()
     if h != commit: print(f"FAIL snapshot hash {h} != commitment {commit}"); ok = False
     else: print("OK snapshot hashes to the commitment")
-    if snap["height"] != a.height or snap["prevhash"] != blk["previousblockhash"]:
-        print(f"FAIL snapshot is for h={snap['height']} prev={snap['prevhash'][:16]}…, block prev={blk['previousblockhash'][:16]}…"); ok = False
+    # prevhash binds the snapshot to this block's parent (the split was computed for the next block on it);
+    # height is Prime's node view when the coinbaser was issued and can lag by one when the gateway's node
+    # saw the parent first — informational only.
+    if snap["prevhash"] != blk["previousblockhash"]:
+        print(f"FAIL snapshot was computed on prev={snap['prevhash'][:16]}…, block's prev={blk['previousblockhash'][:16]}…"); ok = False
+    else:
+        print(f"OK snapshot was computed on this block's parent" + (f" (height noted {snap['height']}, block {a.height})" if snap["height"] != a.height else ""))
     problems, payees, pool_sats = recompute(snap)
     for p in problems: print("FAIL", p); ok = False
     if not problems: print(f"OK TIDES split ({len(payees)} payees, fee {snap['params']['fee_bps']} bps, carry paid {sum(x['sats'] for x in snap['split']['carry_paid'])} sats) reproduces from the committed window")
