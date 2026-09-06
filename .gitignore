@@ -1,0 +1,5 @@
+/target
+*.toml
+!prime.toml.example
+!Cargo.toml
+!rustfmt.toml
