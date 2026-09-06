@@ -624,11 +624,18 @@ impl Session {
         }
         self.shared.totals.add(&self.shared.totals.accepted, 1);
         self.shared.totals.add(&self.shared.totals.work, v.work);
+        let kind = v.coinbase_kind.clone();
         self.shared.client_update(self.id, |c| {
             c.accepted += 1;
             c.work += v.work;
             c.last_share_ts = ts;
             c.identity = identity.clone();
+            match kind {
+                CoinbaseKind::Split => c.cb_split += 1,
+                CoinbaseKind::Partial(_) => c.cb_partial += 1,
+                CoinbaseKind::PoolOnly => c.cb_pool_only += 1,
+                CoinbaseKind::Foreign => c.cb_foreign += 1,
+            }
         });
         let status = if matches!(v.coinbase_kind, CoinbaseKind::Split) {
             mining::ACCEPTED

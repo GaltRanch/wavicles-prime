@@ -49,6 +49,16 @@ pub struct ClientInfo {
     pub coinbasers: u64,
     pub block_candidates: u64,
     pub last_reject: Option<&'static str>,
+    /// WAVICLES: how the shares' coinbases classified against the issued split.
+    #[serde(default)]
+    pub cb_split: u64,
+    #[serde(default)]
+    pub cb_partial: u64,
+    #[serde(default)]
+    pub cb_pool_only: u64,
+    #[serde(default)]
+    pub cb_foreign: u64,
+
 }
 
 #[derive(Default)]

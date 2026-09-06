@@ -77,6 +77,17 @@ pub fn build(shared: &Shared) -> Value {
     };
     let owed: u64 =
         shared.blocks.lock().unwrap().iter().filter(|b| !b.kind.starts_with("orphan")).map(|b| b.owed_sats).sum();
+    let coinbase_kinds = {
+        let c = shared.clients.lock().unwrap();
+        let (mut sp, mut pa, mut po, mut fo) = (0u64, 0u64, 0u64, 0u64);
+        for v in c.values() {
+            sp += v.cb_split;
+            pa += v.cb_partial;
+            po += v.cb_pool_only;
+            fo += v.cb_foreign;
+        }
+        json!({ "split": sp, "partial": pa, "pool_only": po, "foreign": fo })
+    };
     let (carry_total, carry_entries) = {
         let c = shared.carry.lock().unwrap();
         let entries: Vec<Value> = c.owed.iter().map(|(i, s)| json!({ "identity": i, "sats": s })).collect();
@@ -170,6 +181,7 @@ pub fn build(shared: &Shared) -> Value {
         "connections_open": shared.connections.lock().unwrap().total(),
         "owed": owed,
         "wavicles": {
+            "coinbase_kinds": coinbase_kinds,
             "carry_forward": shared.cfg.carry_forward,
             "carry_total_sats": carry_total,
             "carry": carry_entries,
