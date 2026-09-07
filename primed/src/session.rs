@@ -467,7 +467,14 @@ impl Session {
             value,
             outputs,
             payees: split.payees,
-            unpaid: split.unpaid.iter().map(|(i, s, _)| (i.clone(), *s)).collect(),
+            // NoScript (username that is not a payable address) can never be paid by any coinbase: carrying it
+            // would only grow a balance nobody can claim. It stays in the snapshot's `unpaid` for transparency.
+            unpaid: split
+                .unpaid
+                .iter()
+                .filter(|(_, _, r)| !matches!(r, tides::split::UnpaidReason::NoScript))
+                .map(|(i, s, _)| (i.clone(), *s))
+                .collect(),
             carry_paid: split.carry_paid,
             snapshot: snapshot_hex,
         });
