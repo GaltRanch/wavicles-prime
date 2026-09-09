@@ -24,6 +24,12 @@ pub struct SplitParams {
     /// hold 16 KiB total; leave room for the scriptSig, the pool output and the witness
     /// commitment.
     pub output_budget_bytes: usize,
+    /// PyBLØCK "pay like CHIRP" (2026-09-09): at most this many payees per block, the largest by
+    /// work, and `value − fee` is split among THEM in full. Nothing is left for the pool beyond
+    /// its fee, so a small-coinbase miner (≈15 outputs) never leaves sats in the pool's custody.
+    /// Identities below the cut get nothing from this block (`BelowCut`); their work stays in
+    /// the window. 0 = unlimited (the classic rule: the remainder goes to the pool as carry).
+    pub max_payees: usize,
 }
 
 impl Default for SplitParams {
@@ -34,6 +40,7 @@ impl Default for SplitParams {
             min_payout: 546,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            max_payees: 0,
         }
     }
 }
@@ -69,6 +76,8 @@ pub enum UnpaidReason {
     NoScript,
     BelowMinimum,
     OverBudget,
+    /// Ranked below `max_payees` by work: paid nothing by this block, not carried.
+    BelowCut,
 }
 
 impl Split {
@@ -110,10 +119,12 @@ pub fn compute_with_carry(
     let mut unpaid = Vec::new();
     let mut paid = 0u64;
     let mut bytes = 0usize;
+    let mut fee_mix: Vec<(u64, u64)> = Vec::new();   // (stratum_work, datum_work) per miner, for the exact capped fee
     if total_work > 0 {
         for m in miners {
             let sw = m.stratum_work.min(m.work);
             let dw = m.work - sw;
+            fee_mix.push((sw, dw));
             let keep = u128::from(sw) * u128::from(10_000 - stratum_bps)
                 + u128::from(dw) * u128::from(10_000 - p.fee_bps);
             let sats = (u128::from(value) * keep / u128::from(total_work) / 10_000) as u64;
@@ -143,6 +154,34 @@ pub fn compute_with_carry(
             paid += sats;
             payees.push(Payee { identity: m.identity, work: m.work, sats, script });
         }
+    }
+    // Capped, remainder-free split ("pay like CHIRP"): keep the `max_payees` largest payees and
+    // give them `value − fee` in full, proportionally to their work. The pool's output is then
+    // exactly its fee: no dust, no over-budget leftovers, nothing owed to anyone.
+    if p.max_payees > 0 && !payees.is_empty() {
+        // exact fee in one expression (no per-miner floors), so pool_sats == fee to the sat
+        let (mut sw_all, mut dw_all) = (0u128, 0u128);
+        for (sw, dw) in fee_mix.iter() { sw_all += u128::from(*sw); dw_all += u128::from(*dw); }
+        fee_sats = (u128::from(value) * (sw_all * u128::from(stratum_bps) + dw_all * u128::from(p.fee_bps))
+            / u128::from(total_work.max(1)) / 10_000) as u64;
+        payees.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| a.identity.cmp(&b.identity)));
+        if payees.len() > p.max_payees {
+            for q in payees.split_off(p.max_payees) {
+                unpaid.push((q.identity, q.sats, UnpaidReason::BelowCut));
+            }
+        }
+        let distributable = value.saturating_sub(fee_sats);
+        let kept_work: u128 = payees.iter().map(|q| u128::from(q.work)).sum();
+        let mut sum = 0u64;
+        for q in payees.iter_mut() {
+            q.sats = (u128::from(distributable) * u128::from(q.work) / kept_work.max(1)) as u64;
+            sum += q.sats;
+        }
+        // rounding dust goes to the largest payee, so paid == distributable exactly
+        if let Some(top) = payees.iter_mut().max_by_key(|q| q.sats) {
+            top.sats += distributable - sum;
+        }
+        paid = distributable;
     }
     // Carry-forward: pay what earlier blocks could not, out of everything this block would
     // send to the pool — fee included. The pool already received those sats in the earlier
@@ -221,6 +260,7 @@ mod tests {
             min_payout: 400_000,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            max_payees: 0,
         };
         let s = compute(miners, 1001, 312_538_966, &p, script);
         assert_eq!(s.fee_sats, 1_562_694);
@@ -239,12 +279,12 @@ mod tests {
     fn unpayable_and_budget() {
         let miners: Vec<MinerStat> =
             (0..20).map(|i| miner(&format!("{}{}", if i == 3 { "bad" } else { "m" }, i), 100)).collect();
-        let p = SplitParams { fee_bps: 0, stratum_fee_bps: 0, min_payout: 1, max_outputs: 5, output_budget_bytes: 14_000 };
+        let p = SplitParams { fee_bps: 0, stratum_fee_bps: 0, min_payout: 1, max_outputs: 5, output_budget_bytes: 14_000 , max_payees: 0};
         let s = compute(miners, 2000, 1_000_000, &p, script);
         assert_eq!(s.payees.len(), 5);
         assert!(s.unpaid.iter().any(|u| u.2 == UnpaidReason::NoScript));
         assert_eq!(s.unpaid.iter().filter(|u| u.2 == UnpaidReason::OverBudget).count(), 14);
-        let p = SplitParams { fee_bps: 0, stratum_fee_bps: 0, min_payout: 1, max_outputs: 512, output_budget_bytes: 12 * 2 };
+        let p = SplitParams { fee_bps: 0, stratum_fee_bps: 0, min_payout: 1, max_outputs: 512, output_budget_bytes: 12 * 2 , max_payees: 0};
         let s = compute(vec![miner("a", 1), miner("b", 1), miner("c", 1)], 3, 300, &p, script);
         assert_eq!(s.payees.len(), 2);
         assert_eq!(s.pool_sats, 100);
@@ -266,6 +306,7 @@ mod tests {
             min_payout: 1,
             max_outputs: 512,
             output_budget_bytes: 14_000,
+            max_payees: 0,
         };
         let s = compute(miners, 1000, 10_000_000, &p, script);
         assert_eq!(s.payees[0].identity, "datum");
@@ -278,7 +319,7 @@ mod tests {
 
     #[test]
     fn carry_forward_pays_from_remainder_and_never_exceeds_value() {
-        let p = SplitParams { fee_bps: 40, stratum_fee_bps: 0, min_payout: 546, max_outputs: 512, output_budget_bytes: 14_000 };
+        let p = SplitParams { fee_bps: 40, stratum_fee_bps: 0, min_payout: 546, max_outputs: 512, output_budget_bytes: 14_000 , max_payees: 0};
         let miners = vec![
             MinerStat { identity: "a".into(), work: 3, stratum_work: 0, credits: 1, last_ts: 0 },
             MinerStat { identity: "b".into(), work: 1, stratum_work: 0, credits: 1, last_ts: 0 },
@@ -314,5 +355,21 @@ mod tests {
         let paid2: u64 = s2.payees.iter().map(|q| q.sats).sum();
         assert_eq!(paid2 + s2.pool_sats, value);
         assert_eq!(s2.pool_sats, 0);
+    }
+
+    #[test]
+    fn max_payees_pays_value_minus_fee_in_full_to_the_largest() {
+        let miners: Vec<MinerStat> = (0..20).map(|i| miner(&format!("m{i:02}"), 100 + (20 - i) as u64)).collect();
+        let total: u64 = miners.iter().map(|m| m.work).sum();
+        let p = SplitParams { fee_bps: 40, stratum_fee_bps: 0, min_payout: 546, max_outputs: 512, output_budget_bytes: 14_000, max_payees: 14 };
+        let value = 312_517_600u64;
+        let s = compute(miners, total, value, &p, script);
+        assert_eq!(s.payees.len(), 14);
+        assert_eq!(s.unpaid.iter().filter(|u| u.2 == UnpaidReason::BelowCut).count(), 6);
+        assert_eq!(s.fee_sats, fee_for(value, 40));
+        assert_eq!(s.paid_sats(), value - s.fee_sats);           // miners get everything but the fee
+        assert_eq!(s.pool_sats, s.fee_sats);                       // the pool gets exactly its fee
+        assert!(s.payees.windows(2).all(|w| w[0].work >= w[1].work));
+        assert!(s.carry_paid.is_empty());
     }
 }

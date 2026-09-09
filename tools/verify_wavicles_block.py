@@ -39,6 +39,22 @@ def recompute(snap):
             if sats < min_payout: continue  # unpaid: BelowMinimum
             if m["identity"] not in script_of: continue  # NoScript / OverBudget — listed in split.unpaid
             payees.append([m["identity"], sats, script_of[m["identity"]]]); paid += sats
+    # PyBLØCK max_payees (2026-09-09): keep the largest `max_payees` by work and give them value − fee in full;
+    # the pool's output is exactly the fee; identities below the cut get nothing (BelowCut), nothing is carried.
+    max_payees = int(p.get("max_payees", 0) or 0)
+    if max_payees > 0 and payees:
+        ids_by = {i["identity"]: int(i["work"]) for i in ids}
+        sw_all = sum(int(i.get("stratum_work", 0)) for i in ids); dw_all = total_work - sw_all
+        sbps = int(p.get("stratum_fee_bps", 0) or 0) or fee_bps
+        fee = value * (sw_all * sbps + dw_all * fee_bps) // max(total_work, 1) // 10000
+        payees.sort(key=lambda q: (-ids_by[q[0]], q[0]))
+        payees = payees[:max_payees]
+        distributable = value - fee; kept_work = sum(ids_by[q[0]] for q in payees)
+        tot = 0
+        for q in payees:
+            q[1] = distributable * ids_by[q[0]] // max(kept_work, 1); tot += q[1]
+        top = max(payees, key=lambda q: q[1]); top[1] += distributable - tot
+        paid = distributable
     # carry: paid from everything the pool would get (fee included), by identity name (BTreeMap order)
     room = value - paid
     for c in sorted(snap.get("carry", []), key=lambda c: c["identity"]):

@@ -423,6 +423,7 @@ impl Session {
                 sp.min_payout,
                 sp.max_outputs,
                 sp.output_budget_bytes,
+                sp.max_payees,
                 target,
                 total_work,
                 &miners,

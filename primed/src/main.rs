@@ -265,6 +265,7 @@ fn run(cfg: Config) -> i32 {
             // output appended after the payees. The byte budget leaves room for it too.
             max_outputs: 511,
             output_budget_bytes: 14_000 - 9 - 64,
+            max_payees: cfg.max_payees,
         },
         pool_script,
         pool,

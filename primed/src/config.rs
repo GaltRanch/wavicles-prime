@@ -105,6 +105,10 @@ pub struct Config {
     /// later coinbases instead of holding it as "owed".
     #[serde(default = "d_true")]
     pub carry_forward: bool,
+    /// PyBLØCK: cap on payees per block; `value − fee` goes to the largest ones in full, so the
+    /// pool's output is exactly its fee (no custody). 0 = unlimited (classic rule + carry).
+    #[serde(default)]
+    pub max_payees: usize,
 
     // Keys the previous Prime used. Accepted so an existing config starts unchanged;
     // `load` reports each one it saw.
