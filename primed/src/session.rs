@@ -125,6 +125,8 @@ struct Session {
     coinbaser_refill_at: Instant,
     /// Timestamps of recent rejects and malformed messages; see `note_reject`.
     recent_rejects: VecDeque<Instant>,
+    /// Whether this session already warned that a username is not a payable address.
+    bad_username_warned: bool,
 }
 
 pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr) -> Result<(), SessionError> {
@@ -204,6 +206,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         coinbaser_tokens: COINBASER_BURST,
         coinbaser_refill_at: Instant::now(),
         recent_rejects: VecDeque::new(),
+        bad_username_warned: false,
     };
     s.serve().await
 }
@@ -524,6 +527,21 @@ impl Session {
         // `canonical_identity`); base58 and non-addresses are kept byte-exact.
         let identity = address::canonical_identity(address::identity_of(&s.username));
         if identity.is_empty() || identity.len() > 128 || !identity.bytes().all(|b| b.is_ascii_graphic()) {
+            return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
+        }
+        // A username that is not a payable address on this network can never receive a coinbase
+        // output: reject the share as bad-username so the gateway's log tells the miner at once,
+        // instead of crediting work whose sats would stay with the pool (2026-09-09: worker names
+        // such as "sc184" sent through a pool_pass_full_users gateway).
+        if address::to_script(&identity, self.shared.network).is_none() {
+            if !self.bad_username_warned {
+                self.bad_username_warned = true;
+                log::warn!(
+                    "[{}] rejecting shares from {identity:?}: not a payable address on this network. \
+                     The miner's stratum username must be its Bitcoin address, optionally '.worker'.",
+                    self.id
+                );
+            }
             return self.reject(&s, mining::REJECT_BAD_USERNAME).await;
         }
 
