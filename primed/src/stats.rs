@@ -53,6 +53,13 @@ pub fn build(shared: &Shared) -> Value {
     // honestly instead of recomputing its own split.
     let reasons: std::collections::HashMap<&str, String> =
         split.unpaid.iter().map(|(i, _, r)| (i.as_str(), format!("{r:?}"))).collect();
+    // The published RULE (Curly 2026-09-09): everyone with work in the window is paid by work, minimum
+    // min_payout per identity, the rest pro-rated among them, pool = fee. That is the capped split with
+    // an effectively unlimited cap; `payout_sats` above is what the finder's coinbase can carry today.
+    let rule_params = tides::split::SplitParams { max_payees: 100_000, ..shared.split_params.clone() };
+    let rule_split = w.split(sample_value, &rule_params, |i| address::to_script(i, shared.network));
+    let rule_sats: std::collections::HashMap<&str, u64> =
+        rule_split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
 
     let miners: Vec<Value> = w
         .miners()
@@ -70,6 +77,7 @@ pub fn build(shared: &Shared) -> Value {
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
                 "payout_sats": payouts.get(m.identity.as_str()).copied().unwrap_or(0),
                 "unpaid_reason": reasons.get(m.identity.as_str()).cloned().unwrap_or_default(),
+                "rule_sats": rule_sats.get(m.identity.as_str()).copied().unwrap_or(0),
                 "payable": payable,
                 "hashrate_ghs": ghs(rw),
                 "last_share_s": ts.saturating_sub(u64::from(last.max(m.last_ts))),
@@ -166,6 +174,8 @@ pub fn build(shared: &Shared) -> Value {
             "sample_value": sample_value,
             "sample_pool_sats": split.pool_sats,
             "sample_fee_sats": split.fee_sats,
+            "rule_paid_sats": rule_split.paid_sats(),
+            "rule_payees": rule_split.payees.len(),
         },
         "hashrate": { "pool_ghs": ghs(recent_total), "window_s": HASHRATE_WINDOW_S },
         "totals": {

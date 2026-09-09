@@ -134,9 +134,6 @@ pub fn compute_with_carry(
                     / u128::from(total_work)
                     / 10_000) as u64,
             );
-            if sats == 0 {
-                continue;
-            }
             if sats < p.min_payout {
                 unpaid.push((m.identity, sats, UnpaidReason::BelowMinimum));
                 continue;
