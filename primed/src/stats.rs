@@ -48,6 +48,11 @@ pub fn build(shared: &Shared) -> Value {
     let split = w.split(sample_value, &shared.split_params, |i| address::to_script(i, shared.network));
     let payouts: std::collections::HashMap<&str, u64> =
         split.payees.iter().map(|p| (p.identity.as_str(), p.sats)).collect();
+    // why an identity gets nothing from the sample split: BelowMinimum (share < min_payout), NoScript
+    // (username is not an address), BelowCut (did not fit the coinbase cap) — so the UI can label a 0
+    // honestly instead of recomputing its own split.
+    let reasons: std::collections::HashMap<&str, String> =
+        split.unpaid.iter().map(|(i, _, r)| (i.as_str(), format!("{r:?}"))).collect();
 
     let miners: Vec<Value> = w
         .miners()
@@ -64,6 +69,7 @@ pub fn build(shared: &Shared) -> Value {
                 "credits": m.credits,
                 "share_percent": if w.total_work() > 0 { 100.0 * m.work as f64 / w.total_work() as f64 } else { 0.0 },
                 "payout_sats": payouts.get(m.identity.as_str()).copied().unwrap_or(0),
+                "unpaid_reason": reasons.get(m.identity.as_str()).cloned().unwrap_or_default(),
                 "payable": payable,
                 "hashrate_ghs": ghs(rw),
                 "last_share_s": ts.saturating_sub(u64::from(last.max(m.last_ts))),
@@ -140,6 +146,7 @@ pub fn build(shared: &Shared) -> Value {
             "stratum_fee_bps": shared.cfg.stratum_fee_bps,
             "window_multiple": shared.cfg.window,
             "min_payout": shared.cfg.min_payout,
+            "max_payees": shared.cfg.max_payees,
             "min_diff": shared.cfg.min_diff,
             "network": shared.cfg.network,
             "advertise": shared.cfg.advertise_address,
