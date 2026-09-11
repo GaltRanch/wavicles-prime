@@ -40,6 +40,9 @@ pub struct ClientInfo {
     pub gateway: String,
     /// `stratum` = house public gateway (higher fee); `datum` = external Prime client.
     pub fee_path: String,
+    /// Bytes of payout outputs the split issued to this gateway may carry (see config).
+    #[serde(default)]
+    pub coinbase_budget: usize,
     pub connected_ts: u64,
     pub identity: String,
     pub accepted: u64,

@@ -75,6 +75,8 @@ pub struct Split {
 pub enum UnpaidReason {
     NoScript,
     BelowMinimum,
+    /// Did not fit the coinbase byte budget of the gateway this split was issued to. In the
+    /// capped rule its share is pro-rated to the payees that fit (nothing is left to the pool).
     OverBudget,
     /// Ranked below `max_payees` by work: paid nothing by this block, not carried.
     BelowCut,
@@ -143,11 +145,15 @@ pub fn compute_with_carry(
                 continue;
             };
             let need = 8 + 1 + script.len();
-            if payees.len() >= p.max_outputs || bytes + need > p.output_budget_bytes {
-                unpaid.push((m.identity, sats, UnpaidReason::OverBudget));
-                continue;
+            // Classic rule: first come, first fit. Capped rule: the budget is applied below,
+            // after ranking by work, so the biggest payees are the ones that fit.
+            if p.max_payees == 0 {
+                if payees.len() >= p.max_outputs || bytes + need > p.output_budget_bytes {
+                    unpaid.push((m.identity, sats, UnpaidReason::OverBudget));
+                    continue;
+                }
+                bytes += need;
             }
-            bytes += need;
             paid += sats;
             payees.push(Payee { identity: m.identity, work: m.work, sats, script });
         }
@@ -162,11 +168,27 @@ pub fn compute_with_carry(
         fee_sats = (u128::from(value) * (sw_all * u128::from(stratum_bps) + dw_all * u128::from(p.fee_bps))
             / u128::from(total_work.max(1)) / 10_000) as u64;
         payees.sort_by(|a, b| b.work.cmp(&a.work).then_with(|| a.identity.cmp(&b.identity)));
-        if payees.len() > p.max_payees {
-            for q in payees.split_off(p.max_payees) {
+        // Largest first, until the cap or the gateway's coinbase byte budget is reached. What
+        // does not fit is not paid by this block and does not weigh in the split, so the
+        // gateway never has to truncate an output (DATUM would, and would hand its value to
+        // the pool output).
+        let mut kept: Vec<Payee> = Vec::with_capacity(payees.len());
+        let mut used = 0usize;
+        for q in payees.drain(..) {
+            let need = 8 + 1 + q.script.len();
+            if kept.len() >= p.max_payees || kept.len() >= p.max_outputs {
                 unpaid.push((q.identity, q.sats, UnpaidReason::BelowCut));
+                continue;
             }
+            if used + need > p.output_budget_bytes {
+                unpaid.push((q.identity, q.sats, UnpaidReason::OverBudget));
+                continue;
+            }
+            used += need;
+            kept.push(q);
         }
+        payees = kept;
+        bytes = used;
         let distributable = value.saturating_sub(fee_sats);
         let kept_work: u128 = payees.iter().map(|q| u128::from(q.work)).sum();
         let mut sum = 0u64;
@@ -352,6 +374,25 @@ mod tests {
         let paid2: u64 = s2.payees.iter().map(|q| q.sats).sum();
         assert_eq!(paid2 + s2.pool_sats, value);
         assert_eq!(s2.pool_sats, 0);
+    }
+
+    #[test]
+    fn capped_rule_applies_the_byte_budget_to_the_largest_and_prorates_the_rest() {
+        // five miners, budget for exactly two P2WPKH outputs (31 bytes each): the two with the
+        // most work are paid value − fee in full, the other three are OverBudget, pool = fee.
+        let miners: Vec<MinerStat> = [("a", 50u64), ("b", 40), ("c", 30), ("d", 20), ("e", 10)]
+            .iter()
+            .map(|(n, w)| MinerStat { identity: n.to_string(), work: *w, stratum_work: 0, credits: *w, last_ts: 0 })
+            .collect();
+        let p = SplitParams { fee_bps: 40, stratum_fee_bps: 0, min_payout: 1, max_outputs: 512, output_budget_bytes: 62, max_payees: 511 };
+        let s = compute(miners, 150, 1_000_000, &p, |_| Some(vec![0u8; 22]));
+        assert_eq!(s.payees.len(), 2);
+        assert_eq!(s.payees[0].identity, "a");
+        assert_eq!(s.payees[1].identity, "b");
+        assert_eq!(s.fee_sats, 4_000);
+        assert_eq!(s.pool_sats, 4_000);
+        assert_eq!(s.paid_sats(), 996_000);
+        assert_eq!(s.unpaid.iter().filter(|u| matches!(u.2, UnpaidReason::OverBudget)).count(), 3);
     }
 
     #[test]

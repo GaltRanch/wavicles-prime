@@ -52,6 +52,20 @@ pub struct Config {
     /// Treat loopback Prime connections as house stratum. Default on.
     #[serde(default = "d_true")]
     pub house_loopback: bool,
+    /// Bytes of payout outputs a coinbaser may carry for house gateways (loopback or
+    /// `house-gateways`) and for `big-coinbase-gateways`: the 16 KB coinbase class minus
+    /// tags, extranonce, pool and witness outputs.
+    #[serde(default = "d_coinbase_budget_house")]
+    pub coinbase_budget_house: usize,
+    /// The same for every other gateway. A stock gateway serves the ~730-byte coinbase class
+    /// (about 16 outputs); anything past what its class holds is truncated by the gateway
+    /// and its value lands in the pool output, so the split must stop before that.
+    #[serde(default = "d_coinbase_budget_default")]
+    pub coinbase_budget_default: usize,
+    /// Gateway key prefixes (hex) known to run a 16 KB-coinbase build: they get the house
+    /// budget without being house stratum (they still pay the DATUM fee).
+    #[serde(default)]
+    pub big_coinbase_gateways: Vec<String>,
     /// Smallest share difficulty gateways may send (power of two). Also sent as the vardiff floor.
     #[serde(default = "d_min_diff")]
     pub min_diff: u64,
@@ -162,6 +176,12 @@ fn d_headline() -> String {
 fn d_true() -> bool {
     true
 }
+fn d_coinbase_budget_house() -> usize {
+    14_000 - 9 - 64
+}
+fn d_coinbase_budget_default() -> usize {
+    540
+}
 fn d_max_connections() -> u32 {
     256
 }
@@ -199,6 +219,12 @@ impl Config {
         }
         for g in &mut c.house_gateways {
             *g = g.to_ascii_lowercase();
+        }
+        for g in &mut c.big_coinbase_gateways {
+            *g = g.to_ascii_lowercase();
+        }
+        if c.coinbase_budget_default < 64 || c.coinbase_budget_house < c.coinbase_budget_default {
+            return Err("coinbase-budget-default must be at least 64 and coinbase-budget-house at least coinbase-budget-default".into());
         }
         if c.snapshot_tag.len() > 40 || c.snapshot_tag.bytes().any(|b| !(0x20..0x7f).contains(&b)) {
             return Err("snapshot-tag must be printable ASCII of at most 40 bytes".into());

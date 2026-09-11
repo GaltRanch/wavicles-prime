@@ -18,7 +18,7 @@ use datum_wire::mining::{self, ClientMsg, JobValidationReply, PowSubmit, Validat
 use datum_wire::verify::{self, CoinbaseKind, JobSlot, Policy, VerifiedShare};
 use datum_wire::{cmd, MAX_CMD_LEN};
 use rand_core::{OsRng, RngCore};
-use tides::{BlockRecord, Payee, SOURCE_DATUM, SOURCE_STRATUM};
+use tides::{BlockRecord, Payee, SplitParams, SOURCE_DATUM, SOURCE_STRATUM};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::{interval, MissedTickBehavior};
@@ -34,6 +34,18 @@ fn house_stratum(cfg: &Config, remote: SocketAddr, gateway_hex: &str) -> bool {
     }
     let g = gateway_hex.to_ascii_lowercase();
     cfg.house_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h))
+}
+
+/// Payout-output byte budget for the split issued to this gateway (see `Config`).
+fn coinbase_budget(cfg: &Config, remote: SocketAddr, gateway_hex: &str) -> usize {
+    if house_stratum(cfg, remote, gateway_hex) {
+        return cfg.coinbase_budget_house;
+    }
+    let g = gateway_hex.to_ascii_lowercase();
+    if cfg.big_coinbase_gateways.iter().any(|h| !h.is_empty() && g.starts_with(h)) {
+        return cfg.coinbase_budget_house;
+    }
+    cfg.coinbase_budget_default
 }
 
 const MAX_HELLO: usize = 4096;
@@ -103,6 +115,8 @@ struct Session {
     channel: Channel,
     session_key: Identity,
     hello: ClientHello,
+    /// The pool's split parameters with this gateway's coinbase byte budget.
+    split_params: SplitParams,
     slots: Vec<JobSlot>,
     /// Coinbase section bytes held across all slots, against `cfg.session_coinbase_budget`.
     coinbase_bytes: usize,
@@ -157,8 +171,9 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
 
     let gateway_hex = hex::encode(&hello.identity_sign_pk[..8]);
     let fee_path = if house_stratum(&shared.cfg, remote, &gateway_hex) { "stratum" } else { "datum" };
+    let budget = coinbase_budget(&shared.cfg, remote, &gateway_hex);
     log::info!(
-        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path}{}",
+        "[{id}] {remote} hello ua={:?} gateway={gateway_hex} gen={:?} fee={fee_path} coinbase_budget={budget}{}",
         hello.user_agent,
         hello.generation,
         if hello.resume_token.is_some() { " (asked to resume; declined)" } else { "" }
@@ -176,6 +191,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
             gateway: gateway_hex.clone(),
             connected_ts: now(),
             fee_path: fee_path.into(),
+            coinbase_budget: budget,
             ..Default::default()
         },
     );
@@ -193,6 +209,7 @@ pub async fn run(shared: Arc<Shared>, mut stream: TcpStream, remote: SocketAddr)
         channel,
         session_key,
         hello,
+        split_params: SplitParams { output_budget_bytes: budget, ..shared.split_params.clone() },
         slots: (0..mining::MAX_JOB_SLOTS).map(|_| JobSlot::default()).collect(),
         coinbase_bytes: 0,
         live_slots: VecDeque::new(),
@@ -400,7 +417,7 @@ impl Session {
         let (split, target, total_work, miners) = {
             let ledger = self.shared.ledger.lock().unwrap();
             let net = self.shared.network;
-            let s = ledger.window.split_with_carry(value, &self.shared.split_params, &carry_map, |ident| {
+            let s = ledger.window.split_with_carry(value, &self.split_params, &carry_map, |ident| {
                 address::to_script(ident, net)
             });
             (s, ledger.window.target_work(), ledger.window.total_work(), ledger.window.miners())
@@ -411,7 +428,7 @@ impl Session {
             let height = self.shared.tip_snapshot().map(|t| t.height + 1).unwrap_or(0);
             let mut ph = prev_hash;
             ph.reverse();
-            let sp = &self.shared.split_params;
+            let sp = &self.split_params;
             let snap = snapshot::build(
                 &self.shared.cfg.snapshot_tag,
                 height,
@@ -760,7 +777,7 @@ impl Session {
                 let ledger = self.shared.ledger.lock().unwrap();
                 let net = self.shared.network;
                 let sp =
-                    ledger.window.split(v.coinbase_value, &self.shared.split_params, |i| address::to_script(i, net));
+                    ledger.window.split(v.coinbase_value, &self.split_params, |i| address::to_script(i, net));
                 let owed = sp.paid_sats();
                 let list: Vec<(String, u64)> = sp.payees.iter().map(|p| (p.identity.clone(), p.sats)).collect();
                 unpaid_rec.extend(list.iter().cloned());

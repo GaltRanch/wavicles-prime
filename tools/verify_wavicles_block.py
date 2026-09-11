@@ -48,7 +48,15 @@ def recompute(snap):
         sbps = int(p.get("stratum_fee_bps", 0) or 0) or fee_bps
         fee = value * (sw_all * sbps + dw_all * fee_bps) // max(total_work, 1) // 10000
         payees.sort(key=lambda q: (-ids_by[q[0]], q[0]))
-        payees = payees[:max_payees]
+        # 2026-09-11: largest first until the cap OR the gateway's coinbase byte budget (params.output_budget_bytes)
+        # is full; what does not fit is OverBudget (not paid by this block, not weighed), never truncated by the gateway.
+        budget = int(p.get("output_budget_bytes", 0) or 0); used = 0; kept = []
+        for q in payees:
+            need = 9 + len(q[2]) // 2
+            if len(kept) >= max_payees: break
+            if budget and used + need > budget: continue
+            used += need; kept.append(q)
+        payees = kept
         distributable = value - fee; kept_work = sum(ids_by[q[0]] for q in payees)
         tot = 0
         for q in payees:
